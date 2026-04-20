@@ -99,11 +99,11 @@ Telegram ──> Railway (this bot) ──SSH──> GCP VM (Android emulator + 
 
 ## Execution Flow
 
-1. Dev sends `/test_iap` to the Telegram bot.
+1. Dev sends `/test_iap` (or `/test_iap chatgpt-plus-monthly`) to the Telegram bot.
 2. Railway bot SSH-execs into GCP.
-3. GCP worker script boots a clean emulator.
-4. Script launches target app, injects Frida to monitor network/SSL state during the billing flow.
-5. ADB simulates UAT taps to verify UI responsiveness during checkout.
+3. GCP worker loads emulator snapshot (or boots fresh AVD).
+4. Script launches ChatGPT, injects Frida hooks for SSL bypass, billing interception, and Appdome bypass.
+5. ADB simulates subscription UI taps (configurable coordinates from `subscription_plans.json`).
 6. Results are piped back to Telegram.
 
 ## Bot Commands
@@ -112,8 +112,13 @@ Telegram ──> Railway (this bot) ──SSH──> GCP VM (Android emulator + 
 |---------|-------------|
 | `/start` `/help` | Show available commands |
 | `/test_iap` | Run the full IAP validation QA suite on GCP |
+| `/test_iap <plan>` | Run with specific plan (e.g. `chatgpt-plus-monthly`) |
 | `/status` | Check GCP node connectivity |
 | `/diagnose` | Run network diagnostics (DNS, TCP port, SSH auth) |
+| `/install_apk <url>` | Download & install APK on emulator |
+| `/snapshot save <name>` | Save current emulator state as snapshot |
+| `/snapshot load <name>` | Load a saved emulator snapshot |
+| `/snapshot list` | List available snapshots |
 | `/run <cmd>` | Execute a custom command on GCP |
 | `/logs` | Fetch last 50 lines of QA worker log |
 | `/emulator` | Check emulator status on GCP |
@@ -254,6 +259,73 @@ qa-automation-bot/
 └── README.md                     # This file
 ```
 
+## ChatGPT IAP Testing Workflow
+
+Complete step-by-step guide for testing ChatGPT's in-app purchase flow:
+
+### Step 1: Install ChatGPT APK on Emulator
+```bash
+# From Telegram — download and install directly:
+/install_apk https://example.com/chatgpt.apk
+
+# Or from GCP VM manually:
+/run wget -O ~/chatgpt.apk "https://apkpure.com/apk/com.openai.chatgpt/download"
+/run adb install -r -g ~/chatgpt.apk
+
+# Verify installation:
+/run adb shell pm list packages | grep com.openai.chatgpt
+```
+
+### Step 2: Configure Google Play Account
+```bash
+# Boot emulator (fresh):
+/run bash scripts/setup_emulator.sh --no-wipe
+
+# Manually log into Google Play on the emulator (use VNC or scrcpy)
+# Then save the logged-in state as a snapshot:
+/snapshot save chatgpt_logged_in
+```
+
+### Step 3: Run IAP Test
+```bash
+# Run with the saved snapshot and a specific plan:
+/test_iap chatgpt-plus-monthly
+
+# Or run from GCP directly with custom Frida hooks:
+/run bash scripts/qa_worker.sh --snapshot chatgpt_logged_in --plan chatgpt-plus-monthly --frida-script /home/ubuntu/custom_hook.js
+```
+
+### Step 4: Review Results
+```bash
+# Check execution logs:
+/logs
+
+# Verify Frida hooks were injected:
+/run frida-ps -U | grep chatgpt
+```
+
+### Tap Coordinates
+The UI tap coordinates for ChatGPT are configured in `config/subscription_plans.json` under `tap_coordinates`. Adjust these values based on your emulator screen resolution:
+```json
+{
+  "tap_coordinates": {
+    "settings_menu": [980, 160],
+    "subscription_menu": [540, 600],
+    "upgrade_button": [540, 1700],
+    "plan_select": [540, 900],
+    "subscribe_confirm": [540, 1800]
+  }
+}
+```
+
+### Example Full Session
+```
+/install_apk ~/chatgpt.apk          → Install ChatGPT APK
+/snapshot save chatgpt_logged_in     → Save Google Play logged-in state
+/test_iap chatgpt-plus-monthly      → Run IAP test with Plus monthly plan
+/logs                                → Review execution output
+```
+
 ## Enhanced Features
 
 ### Security Countermeasures
@@ -278,15 +350,16 @@ Configure subscription plans in `config/subscription_plans.json`:
 ```json
 {
   "plans": {
-    "1-month": { "offerId": "monthly-sub", "offerToken": "..." },
-    "12-month": { "offerId": "annual-sub", "offerToken": "..." }
+    "chatgpt-plus-monthly": { "offerId": "chatgpt-plus-monthly", "offerToken": "..." },
+    "chatgpt-plus-annual": { "offerId": "chatgpt-plus-annual", "offerToken": "..." },
+    "chatgpt-team": { "offerId": "chatgpt-team", "offerToken": "..." }
   }
 }
 ```
 
 Run with a specific plan:
 ```bash
-bash scripts/qa_worker.sh --plan 1-month
+bash scripts/qa_worker.sh --plan chatgpt-plus-monthly
 ```
 
 Or override at runtime via ADB property:
