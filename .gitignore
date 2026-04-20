@@ -31,3 +31,8 @@ logs/
 *.pem
 *.key
 gcp_key*
+
+# QA test artifacts
+session_*.log
+*.png
+snapshots.txt
