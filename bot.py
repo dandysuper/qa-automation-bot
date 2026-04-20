@@ -343,9 +343,19 @@ if __name__ == "__main__":
     else:
         logger.info("No chat ID restriction configured (open access)")
 
+    # Clear any existing webhook/polling to avoid 409 conflicts
+    logger.info("Clearing previous webhook/polling sessions...")
+    bot.remove_webhook()
+    time.sleep(1)
+
     while True:
         try:
-            bot.polling(none_stop=True, timeout=60)
+            bot.polling(
+                none_stop=True,
+                timeout=60,
+                long_polling_timeout=60,
+                allowed_updates=["message"],
+            )
         except Exception as e:
-            logger.error("Polling error: %s — restarting in 5s", e)
-            time.sleep(5)
+            logger.error("Polling error: %s — restarting in 10s", e)
+            time.sleep(10)
