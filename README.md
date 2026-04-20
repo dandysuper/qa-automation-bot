@@ -18,23 +18,25 @@ Remote QA Automation & IAP Validation Framework. A Telegram bot hosted on [Railw
 ## What Needs Fixing
 
 ### 1. Verify SSH Connectivity (Priority: High)
-The bot was hitting a **409 conflict** (multiple polling instances) — this is now fixed (PR #5). After Railway redeploys:
+The bot was hitting a **409 conflict** (multiple polling instances) and SSH timeouts. Both issues are now addressed:
+- **409 fix:** Graceful SIGTERM shutdown, `delete_webhook(drop_pending_updates=True)`, configurable startup delay, and exponential backoff on 409 retries.
+- **SSH fix:** Automatic retry with configurable attempts (`SSH_RETRIES`) and exponential backoff (`SSH_RETRY_DELAY`).
 - Send `/status` to the bot on Telegram
 - If it shows "GCP node reachable", SSH is working
-- If it shows a timeout, check Railway logs for the detailed error
+- If it shows a timeout after all retries, check Railway logs for the detailed error
 
 ### 2. Configure Target Application (Priority: Medium)
-The worker script (`scripts/qa_worker.sh` and `/home/ubuntu/qa_worker.sh` on GCP) uses placeholder values:
-- Replace `com.target.application` with your actual Android package name
-- Replace `TargetApp` with the app's process name (for Frida)
-- Adjust tap coordinates (`500 1500`, `500 1800`) for your app's checkout UI
-- Install your target APK on the emulator
+Update `config/subscription_plans.json` with your app details:
+- Set `target_package` to your actual Android package name
+- Set `target_process` to the app's process name (for Frida)
+- Configure offer tokens for each subscription plan
+- Adjust tap coordinates in `scripts/qa_worker.sh` for your app's checkout UI
+- Install your target APK: `bash scripts/setup_emulator.sh --apk /path/to/app.apk`
 
-### 3. Frida Profiler Script (Priority: Low)
-The file `/home/ubuntu/qa_profiler.js` on the GCP VM is a placeholder. Replace it with your actual Frida hooks for:
-- SSL pinning monitoring
-- IAP billing flow interception
-- Network traffic analysis
+### 3. Frida Profiler Script (Priority: Done)
+Enhanced Frida hooks are now implemented in `scripts/frida/`:
+- `qa_profiler.js` — Appdome bypass, SSL pinning bypass, billing flow interception, network monitoring
+- `subscription_hooks.js` — Trial detection, OfferId injection, purchase flow logging
 
 ## What to Test
 
@@ -156,6 +158,9 @@ Set these in Railway dashboard (Settings → Variables):
 | `QA_WORKER_SCRIPT` | No | Path to worker script on GCP (default: `/home/ubuntu/qa_worker.sh`) |
 | `SSH_TIMEOUT` | No | SSH connection timeout in seconds (default: `60`) |
 | `COMMAND_TIMEOUT` | No | Remote command timeout in seconds (default: `600`) |
+| `SSH_RETRIES` | No | Number of SSH connection attempts before failing (default: `3`) |
+| `SSH_RETRY_DELAY` | No | Base delay in seconds between SSH retries (default: `5`) |
+| `STARTUP_DELAY` | No | Seconds to wait before polling to avoid 409 conflicts (default: `3`) |
 
 #### Encoding your SSH key
 
@@ -199,19 +204,111 @@ docker run --env-file .env qa-bot
 
 ```
 qa-automation-bot/
-├── bot.py                    # Main Telegram bot (runs on Railway)
+├── bot.py                        # Main Telegram bot (runs on Railway)
 ├── scripts/
-│   ├── qa_worker.sh          # GCP worker script (runs on GCP VM)
-│   └── gcp_vm_setup.sh       # One-shot GCP VM setup script
-├── requirements.txt          # Python dependencies
-├── Procfile                  # Railway process definition
-├── railway.toml              # Railway deployment config
-├── nixpacks.toml             # Nixpacks build config
-├── Dockerfile                # Docker build (alternative)
-├── .env.example              # Environment variable template
-├── .gitignore                # Git ignore rules
-└── README.md                 # This file
+│   ├── qa_worker.sh              # Enhanced GCP worker with color output & logging
+│   ├── gcp_vm_setup.sh           # One-shot GCP VM setup script
+│   ├── setup_emulator.sh         # Automated emulator setup (APK, Frida, root)
+│   ├── frida_service.sh          # Persistent frida-server manager (systemd)
+│   ├── multi_instance_runner.sh  # Parallel AVD instance runner
+│   └── frida/
+│       ├── qa_profiler.js        # Enhanced Frida hooks (Appdome, SSL, billing)
+│       └── subscription_hooks.js # Subscription state detection & OfferId injection
+├── config/
+│   └── subscription_plans.json   # Configurable subscription plan mapping
+├── .github/
+│   └── workflows/
+│       └── qa-tests.yml          # CI/CD pipeline (lint, docker, integration)
+├── requirements.txt              # Python dependencies
+├── Procfile                      # Railway process definition
+├── railway.toml                  # Railway deployment config
+├── nixpacks.toml                 # Nixpacks build config
+├── Dockerfile                    # Docker build (alternative)
+├── .env.example                  # Environment variable template
+├── .gitignore                    # Git ignore rules
+└── README.md                     # This file
 ```
+
+## Enhanced Features
+
+### Security Countermeasures
+
+#### Appdome / libpairipcore.so Bypass
+The enhanced `scripts/frida/qa_profiler.js` includes an obfuscated Appdome bypass that:
+- Uses hex-encoded library name to avoid static string detection
+- Neutralizes all exported functions with architecture-appropriate NOP+RET sequences (ARM64, ARM32, x86/x86_64)
+- Intercepts `JNI_OnLoad` to prevent re-initialization
+
+#### SSL Certificate Pinning Bypass
+Multiple SSL pinning frameworks are bypassed simultaneously:
+- `javax.net.ssl.SSLContext` (universal)
+- OkHttp3 `CertificatePinner`
+- Conscrypt / Android `NetworkSecurityConfig`
+- `TrustManagerImpl` (Android internal)
+
+### Subscription Management
+
+#### Dynamic OfferId Injection
+Configure subscription plans in `config/subscription_plans.json`:
+```json
+{
+  "plans": {
+    "1-month": { "offerId": "monthly-sub", "offerToken": "..." },
+    "12-month": { "offerId": "annual-sub", "offerToken": "..." }
+  }
+}
+```
+
+Run with a specific plan:
+```bash
+bash scripts/qa_worker.sh --plan 1-month
+```
+
+Or override at runtime via ADB property:
+```bash
+adb shell setprop qa.offer.token.override <token>
+```
+
+#### Automated Trial Detection
+The `subscription_hooks.js` Frida script automatically:
+- Queries active purchases via `BillingClient.queryPurchasesAsync`
+- Detects trial periods from order IDs
+- Logs subscription state before injection
+
+### Environment Setup
+
+#### Quick Emulator Setup
+```bash
+# Full automated setup with APK installation
+bash scripts/setup_emulator.sh --apk /path/to/app.apk
+
+# Without wiping data
+bash scripts/setup_emulator.sh --avd pixel_12 --no-wipe
+```
+
+#### Frida Server Persistence
+Keep frida-server running across emulator reboots:
+```bash
+# As a background daemon
+bash scripts/frida_service.sh --start
+
+# As a systemd service (recommended)
+sudo bash scripts/frida_service.sh --install-systemd
+sudo systemctl enable --now frida-server
+```
+
+### Multi-Instance Parallel Testing
+Run QA suites across multiple AVD instances simultaneously:
+```bash
+# Test 3 plans in parallel
+bash scripts/multi_instance_runner.sh --instances 3 --plans "trial,1-month,12-month"
+```
+
+### CI/CD Integration
+GitHub Actions workflow (`.github/workflows/qa-tests.yml`) runs on push/PR:
+- **Lint & Validate**: Python syntax, JSON config, shell script checks
+- **Docker Build**: Verifies container builds correctly
+- **Integration Readiness**: Checks project structure and Frida scripts
 
 ## GCP VM Details
 

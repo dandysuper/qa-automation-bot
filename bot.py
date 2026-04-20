@@ -6,6 +6,8 @@ Telegram bot hosted on Railway, executing QA suites on GCP.
 import logging
 import os
 import base64
+import signal
+import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -35,11 +37,13 @@ ALLOWED_CHAT_IDS = os.getenv("ALLOWED_CHAT_IDS", "")  # comma-separated
 QA_WORKER_SCRIPT = os.getenv("QA_WORKER_SCRIPT", "/home/ubuntu/qa_worker.sh")
 SSH_TIMEOUT = int(os.getenv("SSH_TIMEOUT", "60"))
 COMMAND_TIMEOUT = int(os.getenv("COMMAND_TIMEOUT", "600"))  # 10 min default
+SSH_RETRIES = int(os.getenv("SSH_RETRIES", "3"))
+SSH_RETRY_DELAY = int(os.getenv("SSH_RETRY_DELAY", "5"))  # seconds between retries
+STARTUP_DELAY = int(os.getenv("STARTUP_DELAY", "3"))  # seconds to wait before polling
 
 if not TG_TOKEN:
     logger.error("TG_TOKEN environment variable is required. Set it in Railway dashboard.")
     logger.error("Bot cannot start without a valid Telegram token.")
-    import sys
     sys.exit(1)
 
 bot = telebot.TeleBot(TG_TOKEN, parse_mode="Markdown")
@@ -83,28 +87,43 @@ def _write_key_file() -> str:
 
 
 def get_ssh_client() -> paramiko.SSHClient:
-    """Return a connected SSH client to the GCP execution node."""
+    """Return a connected SSH client to the GCP execution node with retry logic."""
     if not GCP_IP:
         raise ValueError("GCP_IP environment variable is not set")
     key_path = _write_key_file()
+    last_exc: Exception | None = None
     try:
-        logger.info("Connecting to %s@%s:%s (timeout=%ss)", GCP_USER, GCP_IP, GCP_PORT, SSH_TIMEOUT)
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            GCP_IP,
-            port=GCP_PORT,
-            username=GCP_USER,
-            key_filename=key_path,
-            timeout=SSH_TIMEOUT,
-            banner_timeout=SSH_TIMEOUT,
-            auth_timeout=SSH_TIMEOUT,
-        )
-        logger.info("SSH connected successfully")
-        return ssh
-    except Exception as e:
-        logger.error("SSH connection failed: %s (%s)", e, type(e).__name__)
-        raise
+        for attempt in range(1, SSH_RETRIES + 1):
+            try:
+                logger.info(
+                    "SSH attempt %d/%d to %s@%s:%s (timeout=%ss)",
+                    attempt, SSH_RETRIES, GCP_USER, GCP_IP, GCP_PORT, SSH_TIMEOUT,
+                )
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                ssh.connect(
+                    GCP_IP,
+                    port=GCP_PORT,
+                    username=GCP_USER,
+                    key_filename=key_path,
+                    timeout=SSH_TIMEOUT,
+                    banner_timeout=SSH_TIMEOUT,
+                    auth_timeout=SSH_TIMEOUT,
+                )
+                logger.info("SSH connected successfully on attempt %d", attempt)
+                return ssh
+            except Exception as e:
+                last_exc = e
+                logger.warning(
+                    "SSH attempt %d/%d failed: %s (%s)",
+                    attempt, SSH_RETRIES, e, type(e).__name__,
+                )
+                if attempt < SSH_RETRIES:
+                    delay = SSH_RETRY_DELAY * attempt
+                    logger.info("Retrying in %ds...", delay)
+                    time.sleep(delay)
+        logger.error("All %d SSH attempts failed", SSH_RETRIES)
+        raise last_exc  # type: ignore[misc]
     finally:
         os.unlink(key_path)
 
@@ -340,8 +359,21 @@ def cmd_emulator(message: telebot.types.Message):
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Graceful shutdown & entry point
 # ---------------------------------------------------------------------------
+_shutdown_requested = False
+
+
+def _signal_handler(signum: int, _frame: object) -> None:
+    global _shutdown_requested
+    sig_name = signal.Signals(signum).name
+    logger.info("Received %s — shutting down gracefully...", sig_name)
+    _shutdown_requested = True
+    try:
+        bot.stop_polling()
+    except Exception:
+        pass
+
 
 if __name__ == "__main__":
     logger.info("QA Automation Bot starting...")
@@ -351,19 +383,48 @@ if __name__ == "__main__":
     else:
         logger.info("No chat ID restriction configured (open access)")
 
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
     # Clear any existing webhook/polling to avoid 409 conflicts
     logger.info("Clearing previous webhook/polling sessions...")
-    bot.remove_webhook()
-    time.sleep(1)
+    try:
+        bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        logger.warning("Failed to delete webhook: %s", e)
 
-    while True:
+    logger.info("Waiting %ds for previous instances to release polling...", STARTUP_DELAY)
+    time.sleep(STARTUP_DELAY)
+
+    backoff = 5
+    while not _shutdown_requested:
         try:
+            logger.info("Starting polling...")
             bot.polling(
                 none_stop=True,
                 timeout=60,
                 long_polling_timeout=60,
                 allowed_updates=["message"],
+                skip_pending=True,
             )
+        except telebot.apihelper.ApiTelegramException as e:
+            if e.error_code == 409:
+                logger.error("409 Conflict — another instance is polling. Retrying in %ds...", backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+                try:
+                    bot.delete_webhook(drop_pending_updates=True)
+                except Exception:
+                    pass
+            else:
+                logger.error("Telegram API error: %s — restarting in 10s", e)
+                time.sleep(10)
+                backoff = 5
         except Exception as e:
+            if _shutdown_requested:
+                break
             logger.error("Polling error: %s — restarting in 10s", e)
             time.sleep(10)
+            backoff = 5
+
+    logger.info("Bot stopped.")

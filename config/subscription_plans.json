@@ -1,0 +1,36 @@
+{
+  "_comment": "Subscription plan configuration for dynamic OfferId injection",
+  "_usage": "Set TARGET_PLAN env var or pass --plan <name> to qa_worker.sh",
+  "plans": {
+    "trial": {
+      "description": "Free trial (7 days)",
+      "offerId": "free-trial-7d",
+      "offerToken": "",
+      "duration": "P7D",
+      "note": "Set offerToken from Google Play Console"
+    },
+    "1-month": {
+      "description": "Monthly subscription",
+      "offerId": "monthly-sub",
+      "offerToken": "",
+      "duration": "P1M",
+      "note": "Set offerToken from Google Play Console"
+    },
+    "6-month": {
+      "description": "6-month subscription",
+      "offerId": "semi-annual-sub",
+      "offerToken": "",
+      "duration": "P6M",
+      "note": "Set offerToken from Google Play Console"
+    },
+    "12-month": {
+      "description": "Annual subscription",
+      "offerId": "annual-sub",
+      "offerToken": "",
+      "duration": "P1Y",
+      "note": "Set offerToken from Google Play Console"
+    }
+  },
+  "target_package": "com.target.application",
+  "target_process": "TargetApp"
+}
