@@ -18,10 +18,12 @@ Remote QA Automation & IAP Validation Framework. A Telegram bot hosted on [Railw
 ## What Needs Fixing
 
 ### 1. Verify SSH Connectivity (Priority: High)
-The bot was hitting a **409 conflict** (multiple polling instances) — this is now fixed (PR #5). After Railway redeploys:
+The bot was hitting a **409 conflict** (multiple polling instances) and SSH timeouts. Both issues are now addressed:
+- **409 fix:** Graceful SIGTERM shutdown, `delete_webhook(drop_pending_updates=True)`, configurable startup delay, and exponential backoff on 409 retries.
+- **SSH fix:** Automatic retry with configurable attempts (`SSH_RETRIES`) and exponential backoff (`SSH_RETRY_DELAY`).
 - Send `/status` to the bot on Telegram
 - If it shows "GCP node reachable", SSH is working
-- If it shows a timeout, check Railway logs for the detailed error
+- If it shows a timeout after all retries, check Railway logs for the detailed error
 
 ### 2. Configure Target Application (Priority: Medium)
 The worker script (`scripts/qa_worker.sh` and `/home/ubuntu/qa_worker.sh` on GCP) uses placeholder values:
@@ -156,6 +158,9 @@ Set these in Railway dashboard (Settings → Variables):
 | `QA_WORKER_SCRIPT` | No | Path to worker script on GCP (default: `/home/ubuntu/qa_worker.sh`) |
 | `SSH_TIMEOUT` | No | SSH connection timeout in seconds (default: `60`) |
 | `COMMAND_TIMEOUT` | No | Remote command timeout in seconds (default: `600`) |
+| `SSH_RETRIES` | No | Number of SSH connection attempts before failing (default: `3`) |
+| `SSH_RETRY_DELAY` | No | Base delay in seconds between SSH retries (default: `5`) |
+| `STARTUP_DELAY` | No | Seconds to wait before polling to avoid 409 conflicts (default: `3`) |
 
 #### Encoding your SSH key
 
