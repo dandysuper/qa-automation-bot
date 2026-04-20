@@ -33,7 +33,7 @@ SSH_PRIVATE_KEY_B64 = os.getenv("SSH_PRIVATE_KEY_B64")
 ALLOWED_CHAT_IDS = os.getenv("ALLOWED_CHAT_IDS", "")  # comma-separated
 
 QA_WORKER_SCRIPT = os.getenv("QA_WORKER_SCRIPT", "/home/ubuntu/qa_worker.sh")
-SSH_TIMEOUT = int(os.getenv("SSH_TIMEOUT", "30"))
+SSH_TIMEOUT = int(os.getenv("SSH_TIMEOUT", "60"))
 COMMAND_TIMEOUT = int(os.getenv("COMMAND_TIMEOUT", "600"))  # 10 min default
 
 if not TG_TOKEN:
@@ -88,6 +88,7 @@ def get_ssh_client() -> paramiko.SSHClient:
         raise ValueError("GCP_IP environment variable is not set")
     key_path = _write_key_file()
     try:
+        logger.info("Connecting to %s@%s:%s (timeout=%ss)", GCP_USER, GCP_IP, GCP_PORT, SSH_TIMEOUT)
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(
@@ -96,8 +97,14 @@ def get_ssh_client() -> paramiko.SSHClient:
             username=GCP_USER,
             key_filename=key_path,
             timeout=SSH_TIMEOUT,
+            banner_timeout=SSH_TIMEOUT,
+            auth_timeout=SSH_TIMEOUT,
         )
+        logger.info("SSH connected successfully")
         return ssh
+    except Exception as e:
+        logger.error("SSH connection failed: %s (%s)", e, type(e).__name__)
+        raise
     finally:
         os.unlink(key_path)
 
@@ -164,7 +171,8 @@ def cmd_status(message: telebot.types.Message):
     except Exception as e:
         logger.exception("Status check failed")
         bot.edit_message_text(
-            f"GCP node unreachable: `{e}`",
+            f"GCP node unreachable: `{type(e).__name__}: {e}`\n\n"
+            f"Target: `{GCP_USER}@{GCP_IP}:{GCP_PORT}`",
             message.chat.id,
             msg.message_id,
             parse_mode="Markdown",
