@@ -8,6 +8,7 @@ import os
 import base64
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 
 import paramiko
@@ -35,6 +36,13 @@ ALLOWED_CHAT_IDS = os.getenv("ALLOWED_CHAT_IDS", "")  # comma-separated
 QA_WORKER_SCRIPT = os.getenv("QA_WORKER_SCRIPT", "/home/ubuntu/qa_worker.sh")
 SSH_TIMEOUT = int(os.getenv("SSH_TIMEOUT", "30"))
 COMMAND_TIMEOUT = int(os.getenv("COMMAND_TIMEOUT", "600"))  # 10 min default
+
+# IAP test container settings
+DOCKER_IMAGE = os.getenv("DOCKER_IMAGE", "qa-avd-golden:latest")
+QA_DATA_VOLUME = os.getenv("QA_DATA_VOLUME", "/mnt/qa-data")
+TARGET_PACKAGE = os.getenv("TARGET_PACKAGE", "com.yourcompany.app")
+TARGET_APK_PATH = os.getenv("TARGET_APK_PATH", "/mnt/qa-data/app-staging.apk")
+IAP_TEST_TIMEOUT = int(os.getenv("IAP_TEST_TIMEOUT", "900"))  # 15 min default
 
 if not TG_TOKEN:
     raise RuntimeError("TG_TOKEN environment variable is required")
@@ -112,6 +120,11 @@ def run_remote_command(ssh: paramiko.SSHClient, command: str) -> tuple[int, str,
 # ---------------------------------------------------------------------------
 
 
+def _shell_escape(value: str) -> str:
+    """Escape a value for safe use in a shell command string."""
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
 def _truncate(text: str, limit: int = 3500) -> str:
     """Truncate text to fit within Telegram message limits."""
     if len(text) <= limit:
@@ -132,12 +145,15 @@ def cmd_help(message: telebot.types.Message):
     help_text = (
         "*QA Automation Bot*\n\n"
         "Commands:\n"
-        "`/test_iap` - Run the full IAP validation QA suite on GCP\n"
-        "`/status` - Check GCP node connectivity\n"
-        "`/run <cmd>` - Execute a custom command on GCP\n"
-        "`/logs` - Fetch last 50 lines of QA worker log\n"
-        "`/emulator` - Check emulator status on GCP\n"
-        "`/help` - Show this help message\n"
+        "`/test_iap` — Run the full IAP validation QA suite on GCP\n"
+        "`/run_iap_test <email> <password> <mock_payment>` — "
+        "Spin up an isolated Docker container and run the containerized "
+        "IAP flow with Frida instrumentation\n"
+        "`/status` — Check GCP node connectivity\n"
+        "`/run <cmd>` — Execute a custom command on GCP\n"
+        "`/logs` — Fetch last 50 lines of QA worker log\n"
+        "`/emulator` — Check emulator status on GCP\n"
+        "`/help` — Show this help message\n"
     )
     bot.reply_to(message, help_text)
 
@@ -227,6 +243,134 @@ def cmd_test_iap(message: telebot.types.Message):
         logger.exception("QA suite execution failed")
         bot.edit_message_text(
             f"*QA Suite Error*\n\nSSH connection failed: `{e}`",
+            message.chat.id,
+            msg.message_id,
+            parse_mode="Markdown",
+        )
+
+
+@bot.message_handler(commands=["run_iap_test"])
+def cmd_run_iap_test(message: telebot.types.Message):
+    """Containerized IAP test: spin up a disposable Docker environment,
+    inject Frida hooks, run the purchase flow, then tear down."""
+    if not is_authorized(message):
+        return unauthorized_reply(message)
+
+    # Parse arguments: /run_iap_test <email> <password> <mock_payment>
+    parts = message.text.split()
+    if len(parts) < 3:
+        bot.reply_to(
+            message,
+            "Usage: `/run_iap_test <test_email> <test_password> [mock_payment]`\n\n"
+            "Example:\n"
+            "`/run_iap_test qa@example.com P@ssw0rd mock_card_visa`",
+        )
+        return
+
+    test_email = parts[1]
+    test_password = parts[2]
+    mock_payment = parts[3] if len(parts) > 3 else "mock_card_visa"
+    session_id = uuid.uuid4().hex[:12]
+    started = _ts()
+
+    msg = bot.reply_to(
+        message,
+        f"*Containerized IAP Test*\n"
+        f"Session: `{session_id}`\n"
+        f"Started: {started}\n\n"
+        "⏳ Spinning up isolated test environment...",
+    )
+
+    try:
+        ssh = get_ssh_client()
+
+        # Update progress — container starting
+        bot.edit_message_text(
+            f"*Containerized IAP Test*\n"
+            f"Session: `{session_id}`\n"
+            f"Started: {started}\n\n"
+            "1️⃣ SSH connected\n"
+            "2️⃣ Launching Docker container...\n"
+            "3️⃣ Pending — Frida injection\n"
+            "4️⃣ Pending — UI automation\n"
+            "5️⃣ Pending — Validation & teardown",
+            message.chat.id,
+            msg.message_id,
+            parse_mode="Markdown",
+        )
+
+        # Build the docker run command
+        docker_cmd = (
+            f"docker run --rm --privileged "
+            f"--device /dev/kvm:/dev/kvm "
+            f"-e SESSION_ID={session_id} "
+            f"-e TEST_EMAIL={_shell_escape(test_email)} "
+            f"-e TEST_PASSWORD={_shell_escape(test_password)} "
+            f"-e MOCK_PAYMENT={_shell_escape(mock_payment)} "
+            f"-e TARGET_PACKAGE={TARGET_PACKAGE} "
+            f"-e TARGET_APK_PATH={TARGET_APK_PATH} "
+            f"-v {QA_DATA_VOLUME}:/data/qa "
+            f"{DOCKER_IMAGE} "
+            f"2>&1"
+        )
+
+        # Update progress — running
+        bot.edit_message_text(
+            f"*Containerized IAP Test*\n"
+            f"Session: `{session_id}`\n"
+            f"Started: {started}\n\n"
+            "1️⃣ SSH connected\n"
+            "2️⃣ Container launched\n"
+            "3️⃣ Executing UI automation & validating subscription state...\n"
+            "4️⃣ Pending — Results\n"
+            "5️⃣ Pending — Teardown",
+            message.chat.id,
+            msg.message_id,
+            parse_mode="Markdown",
+        )
+
+        exit_code, out, err = run_remote_command(ssh, docker_cmd)
+        ssh.close()
+        finished = _ts()
+
+        # Parse result
+        output = out if out else err
+        last_lines = "\n".join(output.strip().splitlines()[-30:])
+
+        if exit_code == 0:
+            bot.edit_message_text(
+                f"*Containerized IAP Test — PASSED ✅*\n"
+                f"Session: `{session_id}`\n"
+                f"Started: {started} | Finished: {finished}\n\n"
+                f"1️⃣ SSH connected\n"
+                f"2️⃣ Container launched & emulator booted\n"
+                f"3️⃣ Frida hooks injected (hook\\_1m.js)\n"
+                f"4️⃣ IAP flow validated successfully\n"
+                f"5️⃣ Container torn down — clean state\n\n"
+                f"```\n{_truncate(last_lines)}\n```",
+                message.chat.id,
+                msg.message_id,
+                parse_mode="Markdown",
+            )
+        else:
+            status_label = "CANCELED" if exit_code == 2 else "FAILED"
+            bot.edit_message_text(
+                f"*Containerized IAP Test — {status_label} ❌*\n"
+                f"Session: `{session_id}` | Exit: {exit_code}\n"
+                f"Started: {started} | Finished: {finished}\n\n"
+                f"```\n{_truncate(last_lines)}\n```\n\n"
+                f"Logs: `{QA_DATA_VOLUME}/session_{session_id}.log`",
+                message.chat.id,
+                msg.message_id,
+                parse_mode="Markdown",
+            )
+
+    except Exception as e:
+        logger.exception("Containerized IAP test failed")
+        bot.edit_message_text(
+            f"*Containerized IAP Test — ERROR*\n"
+            f"Session: `{session_id}`\n\n"
+            f"Connection failed: `{e}`",
             message.chat.id,
             msg.message_id,
             parse_mode="Markdown",
