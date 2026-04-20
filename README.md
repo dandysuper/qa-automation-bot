@@ -113,6 +113,8 @@ Telegram ──> Railway (this bot) ──SSH──> GCP VM (Android emulator + 
 | `/start` `/help` | Show available commands |
 | `/test_iap` | Run the full IAP validation QA suite on GCP |
 | `/test_iap <plan>` | Run with specific plan (e.g. `chatgpt-plus-monthly`) |
+| `/run_iap_test <email> <pass> [mock]` | Containerized IAP test in disposable Docker environment |
+| `/upload_apk` | Upload APK/XAPK file to GCP via Telegram (reply to file) |
 | `/status` | Check GCP node connectivity |
 | `/diagnose` | Run network diagnostics (DNS, TCP port, SSH auth) |
 | `/install_apk <url>` | Download & install APK on emulator |
@@ -190,6 +192,11 @@ Set these in Railway dashboard (Settings → Variables):
 | `SSH_RETRIES` | No | Number of SSH connection attempts before failing (default: `3`) |
 | `SSH_RETRY_DELAY` | No | Base delay in seconds between SSH retries (default: `5`) |
 | `STARTUP_DELAY` | No | Seconds to wait before polling to avoid 409 conflicts (default: `3`) |
+| `DOCKER_IMAGE` | No | Golden image for containerized IAP tests (default: `qa-avd-golden:latest`) |
+| `QA_DATA_VOLUME` | No | Persistent data volume path on GCP (default: `/mnt/qa-data`) |
+| `TARGET_PACKAGE` | No | Target app package name (default: `com.yourcompany.app`) |
+| `TARGET_APK_PATH` | No | Path to staging APK on GCP (default: `/mnt/qa-data/app-staging.apk`) |
+| `IAP_TEST_TIMEOUT` | No | Timeout for containerized IAP tests in seconds (default: `900`) |
 
 #### Encoding your SSH key
 
@@ -241,6 +248,11 @@ qa-automation-bot/
 │   ├── frida_service.sh          # Persistent frida-server manager (systemd)
 │   ├── multi_instance_runner.sh  # Parallel AVD instance runner
 │   ├── gcp_firewall_setup.sh     # GCP firewall rules for SSH access
+│   ├── setup_session.sh          # Container lifecycle script (7-phase flow)
+│   ├── hook_1m.js                # Frida instrumentation for billing mocks
+│   ├── install_xapk.sh           # Multi-APK (XAPK/APKS) installer
+│   ├── login_automation.py       # Google account login automation via ADB
+│   ├── ui_mapper.sh              # UI element coordinate mapper (uiautomator)
 │   └── frida/
 │       ├── qa_profiler.js        # Enhanced Frida hooks (Appdome, SSL, billing)
 │       └── subscription_hooks.js # Subscription state detection & OfferId injection
@@ -253,6 +265,9 @@ qa-automation-bot/
 ├── Procfile                      # Railway process definition
 ├── railway.toml                  # Railway deployment config
 ├── nixpacks.toml                 # Nixpacks build config
+├── docker/
+│   ├── Dockerfile.golden         # Golden image: Android 12 AVD + Frida + SDK
+│   └── docker-compose.yml        # Container orchestration for QA sessions
 ├── Dockerfile                    # Docker build (alternative)
 ├── .env.example                  # Environment variable template
 ├── .gitignore                    # Git ignore rules
@@ -424,6 +439,45 @@ GitHub Actions workflow (`.github/workflows/qa-tests.yml`) runs on push/PR:
 | Frida Server | `/home/ubuntu/frida/frida-server` |
 | Worker Script | `/home/ubuntu/qa_worker.sh` |
 | Profiler | `/home/ubuntu/qa_profiler.js` |
+
+## Containerized IAP Testing
+
+The containerized pipeline runs each IAP test in an isolated Docker container for clean-state testing:
+
+### Build the Golden Image
+```bash
+# On GCP VM:
+docker build -f docker/Dockerfile.golden -t qa-avd-golden:latest .
+```
+
+### Run a Containerized Test
+```
+/run_iap_test qa@example.com P@ssw0rd mock_card_visa
+```
+
+This triggers the full 7-phase flow:
+1. Container boot from golden image
+2. APK/XAPK installation
+3. Google account login
+4. Pre-warmed snapshot creation
+5. Frida instrumentation injection
+6. UI automation & IAP validation
+7. Teardown & cleanup
+
+### XAPK Support
+Multi-APK packages (`.xapk`, `.apks`) are automatically extracted and installed:
+```bash
+bash scripts/install_xapk.sh /path/to/app.xapk
+```
+
+### APK Upload via Telegram
+Send your APK/XAPK file to the bot, then reply with `/upload_apk` to transfer it to the GCP data volume. Files over 20 MB should be transferred directly via SCP.
+
+### Login Automation
+The `scripts/login_automation.py` script automates Google account sign-in using `uiautomator dump` for element discovery (no hardcoded coordinates).
+
+### UI Coordinate Mapper
+Use `scripts/ui_mapper.sh` to dump the screen hierarchy and find clickable element coordinates for automation scripting.
 
 ## Security Notes
 

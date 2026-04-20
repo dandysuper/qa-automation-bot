@@ -1,0 +1,48 @@
+# ============================================================================
+# docker-compose.yml — IAP QA Test Runner
+#
+# Deploy on the GCP VM. Each `docker compose run` spawns an isolated,
+# disposable emulator container for a single test session.
+#
+# Usage:
+#   TEST_EMAIL="..." TEST_PASSWORD="..." MOCK_PAYMENT="..." \
+#     docker compose run --rm iap-test
+# ============================================================================
+
+services:
+  iap-test:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.golden
+    image: qa-avd-golden:latest
+    privileged: true
+    environment:
+      - SESSION_ID
+      - TEST_EMAIL
+      - TEST_PASSWORD
+      - MOCK_PAYMENT
+      - TARGET_APK_PATH=/data/qa/app-staging.apk
+      - TARGET_PACKAGE=${TARGET_PACKAGE:-com.yourcompany.app}
+      - AVD_NAME=qa_device
+    volumes:
+      - qa-data:/data/qa
+    devices:
+      - /dev/kvm:/dev/kvm
+    tmpfs:
+      - /tmp:size=512M
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "1.0"
+          memory: 2G
+
+volumes:
+  qa-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/qa-data

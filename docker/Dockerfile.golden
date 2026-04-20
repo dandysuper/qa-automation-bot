@@ -1,0 +1,126 @@
+# ============================================================================
+# Golden Image: Android x86_64 AVD (API 31 / Android 12) + Frida Server
+# ============================================================================
+# Build:
+#   docker build -f docker/Dockerfile.golden -t qa-avd-golden:latest .
+#
+# This image provides an immutable, pre-configured Android emulator with
+# Frida server for dynamic QA instrumentation. Each test session spawns a
+# disposable container from this image.
+# ============================================================================
+
+FROM ubuntu:22.04
+
+ARG ANDROID_API_LEVEL=31
+ARG ANDROID_BUILD_TOOLS=31.0.0
+ARG FRIDA_VERSION=16.2.1
+ARG AVD_NAME=qa_device
+ARG AVD_ABI=x86_64
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk \
+    AVD_NAME=${AVD_NAME} \
+    PATH="/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/emulator:${PATH}"
+
+# ---------------------------------------------------------------------------
+# System dependencies
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        unzip \
+        wget \
+        openjdk-11-jdk-headless \
+        libglu1-mesa \
+        libpulse0 \
+        libasound2 \
+        libx11-6 \
+        libxcomposite1 \
+        libxcursor1 \
+        libxdamage1 \
+        libxi6 \
+        libxtst6 \
+        libxrandr2 \
+        qemu-kvm \
+        bridge-utils \
+        cpu-checker \
+        xvfb \
+        procps \
+        adb \
+        python3 \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Android SDK — command-line tools
+# ---------------------------------------------------------------------------
+RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
+    cd /tmp && \
+    wget -q "https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip" \
+         -O cmdline-tools.zip && \
+    unzip -q cmdline-tools.zip -d ${ANDROID_HOME}/cmdline-tools && \
+    mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
+    rm cmdline-tools.zip
+
+# ---------------------------------------------------------------------------
+# Accept licenses & install SDK packages
+# ---------------------------------------------------------------------------
+RUN yes | sdkmanager --licenses > /dev/null 2>&1 && \
+    sdkmanager \
+        "platform-tools" \
+        "platforms;android-${ANDROID_API_LEVEL}" \
+        "build-tools;${ANDROID_BUILD_TOOLS}" \
+        "emulator" \
+        "system-images;android-${ANDROID_API_LEVEL};google_apis;${AVD_ABI}"
+
+# ---------------------------------------------------------------------------
+# Create AVD
+# ---------------------------------------------------------------------------
+RUN echo "no" | avdmanager create avd \
+        --name "${AVD_NAME}" \
+        --package "system-images;android-${ANDROID_API_LEVEL};google_apis;${AVD_ABI}" \
+        --device "pixel_4" \
+        --abi "${AVD_ABI}" \
+        --force
+
+# ---------------------------------------------------------------------------
+# Frida server
+# ---------------------------------------------------------------------------
+RUN cd /tmp && \
+    wget -q "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-server-${FRIDA_VERSION}-android-x86_64.xz" \
+         -O frida-server.xz && \
+    unxz frida-server.xz && \
+    mv frida-server /opt/frida-server && \
+    chmod +x /opt/frida-server
+
+RUN pip3 install --no-cache-dir frida-tools==${FRIDA_VERSION}
+
+# ---------------------------------------------------------------------------
+# Copy QA scripts into image
+# ---------------------------------------------------------------------------
+COPY scripts/setup_session.sh    /opt/qa/setup_session.sh
+COPY scripts/qa_worker.sh        /opt/qa/qa_worker.sh
+COPY scripts/hook_1m.js          /opt/qa/hook_1m.js
+COPY scripts/install_xapk.sh     /opt/qa/install_xapk.sh
+COPY scripts/login_automation.py /opt/qa/login_automation.py
+COPY scripts/ui_mapper.sh        /opt/qa/ui_mapper.sh
+
+RUN chmod +x /opt/qa/*.sh /opt/qa/*.py
+
+# ---------------------------------------------------------------------------
+# Emulator configuration tweaks for headless CI
+# ---------------------------------------------------------------------------
+RUN mkdir -p /root/.android && \
+    echo "hw.gpu.enabled=yes\n\
+hw.gpu.mode=swiftshader_indirect\n\
+hw.ramSize=2048\n\
+hw.lcd.density=440\n\
+hw.lcd.width=1080\n\
+hw.lcd.height=2340\n\
+disk.dataPartition.size=4G\n\
+hw.keyboard=yes" >> /root/.android/avd/${AVD_NAME}.avd/config.ini
+
+EXPOSE 5555 5554 27042
+
+ENTRYPOINT ["/opt/qa/setup_session.sh"]
