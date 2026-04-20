@@ -1,36 +1,43 @@
 {
-  "_comment": "Subscription plan configuration for dynamic OfferId injection",
+  "_comment": "Subscription plan configuration for ChatGPT IAP testing",
   "_usage": "Set TARGET_PLAN env var or pass --plan <name> to qa_worker.sh",
   "plans": {
-    "trial": {
-      "description": "Free trial (7 days)",
-      "offerId": "free-trial-7d",
-      "offerToken": "",
-      "duration": "P7D",
-      "note": "Set offerToken from Google Play Console"
-    },
-    "1-month": {
-      "description": "Monthly subscription",
-      "offerId": "monthly-sub",
+    "chatgpt-plus-monthly": {
+      "description": "ChatGPT Plus monthly subscription",
+      "offerId": "chatgpt-plus-monthly",
       "offerToken": "",
       "duration": "P1M",
-      "note": "Set offerToken from Google Play Console"
+      "note": "Set offerToken from Google Play Console or intercept via Frida"
     },
-    "6-month": {
-      "description": "6-month subscription",
-      "offerId": "semi-annual-sub",
-      "offerToken": "",
-      "duration": "P6M",
-      "note": "Set offerToken from Google Play Console"
-    },
-    "12-month": {
-      "description": "Annual subscription",
-      "offerId": "annual-sub",
+    "chatgpt-plus-annual": {
+      "description": "ChatGPT Plus annual subscription",
+      "offerId": "chatgpt-plus-annual",
       "offerToken": "",
       "duration": "P1Y",
-      "note": "Set offerToken from Google Play Console"
+      "note": "Set offerToken from Google Play Console or intercept via Frida"
+    },
+    "chatgpt-team": {
+      "description": "ChatGPT Team subscription",
+      "offerId": "chatgpt-team",
+      "offerToken": "",
+      "duration": "P1M",
+      "note": "Set offerToken from Google Play Console or intercept via Frida"
     }
   },
-  "target_package": "com.target.application",
-  "target_process": "TargetApp"
+  "target_package": "com.openai.chatgpt",
+  "target_process": "com.openai.chatgpt",
+  "tap_coordinates": {
+    "_comment": "Tap coordinates for ChatGPT UI elements (x, y). Adjust for your screen resolution.",
+    "upgrade_button": [540, 1700],
+    "plan_select": [540, 900],
+    "subscribe_confirm": [540, 1800],
+    "dismiss_dialog": [540, 400],
+    "settings_menu": [980, 160],
+    "subscription_menu": [540, 600]
+  },
+  "emulator": {
+    "snapshot_name": "chatgpt_logged_in",
+    "boot_wait_extra": 15,
+    "post_launch_wait": 10
+  }
 }

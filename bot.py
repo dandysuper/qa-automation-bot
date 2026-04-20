@@ -163,8 +163,13 @@ def cmd_help(message: telebot.types.Message):
         "*QA Automation Bot*\n\n"
         "Commands:\n"
         "`/test_iap` - Run the full IAP validation QA suite on GCP\n"
+        "`/test_iap <plan>` - Run with specific plan (e.g. chatgpt-plus-monthly)\n"
         "`/status` - Check GCP node connectivity\n"
         "`/diagnose` - Run network diagnostics to GCP node\n"
+        "`/install_apk <url>` - Download & install APK on emulator\n"
+        "`/snapshot save <name>` - Save emulator snapshot\n"
+        "`/snapshot load <name>` - Load emulator snapshot\n"
+        "`/snapshot list` - List saved snapshots\n"
         "`/run <cmd>` - Execute a custom command on GCP\n"
         "`/logs` - Fetch last 50 lines of QA worker log\n"
         "`/emulator` - Check emulator status on GCP\n"
@@ -347,8 +352,12 @@ def cmd_test_iap(message: telebot.types.Message):
             parse_mode="Markdown",
         )
 
-        # Step 2-3: Run worker script
-        exit_code, out, err = run_remote_command(ssh, f"bash {QA_WORKER_SCRIPT}")
+        # Step 2-3: Run worker script (with optional plan argument)
+        parts = message.text.split(maxsplit=1)
+        plan_arg = ""
+        if len(parts) > 1:
+            plan_arg = f" --plan {parts[1].strip()}"
+        exit_code, out, err = run_remote_command(ssh, f"bash {QA_WORKER_SCRIPT}{plan_arg}")
         ssh.close()
         finished = _ts()
 
@@ -476,6 +485,144 @@ def cmd_emulator(message: telebot.types.Message):
             msg.message_id,
             parse_mode="Markdown",
         )
+
+
+@bot.message_handler(commands=["install_apk"])
+def cmd_install_apk(message: telebot.types.Message):
+    if not is_authorized(message):
+        return unauthorized_reply(message)
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(
+            message,
+            "Usage: `/install_apk <url_or_path>`\n\n"
+            "Examples:\n"
+            "`/install_apk https://example.com/chatgpt.apk`\n"
+            "`/install_apk ~/chatgpt.apk`",
+        )
+        return
+
+    target = parts[1].strip()
+    msg = bot.reply_to(message, f"Installing APK: `{_truncate(target, 100)}`...")
+
+    try:
+        ssh = get_ssh_client()
+
+        if target.startswith("http://") or target.startswith("https://"):
+            # Download from URL then install
+            bot.edit_message_text(
+                f"Downloading APK from URL...\n`{_truncate(target, 80)}`",
+                message.chat.id, msg.message_id, parse_mode="Markdown",
+            )
+            dl_cmd = (
+                f"wget -q -O /home/ubuntu/downloaded_app.apk '{target}' 2>&1 && "
+                "adb install -r -g /home/ubuntu/downloaded_app.apk 2>&1"
+            )
+            exit_code, out, err = run_remote_command(ssh, dl_cmd)
+        else:
+            # Install from local path on VM
+            exit_code, out, err = run_remote_command(
+                ssh, f"adb install -r -g {target} 2>&1"
+            )
+
+        ssh.close()
+        output = out if out else err
+        status = "APK Installed" if exit_code == 0 else f"Install Failed (exit {exit_code})"
+        bot.edit_message_text(
+            f"*{status}*\n```\n{_truncate(output)}\n```",
+            message.chat.id, msg.message_id, parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.exception("APK install failed")
+        bot.edit_message_text(
+            f"APK install failed: `{e}`",
+            message.chat.id, msg.message_id, parse_mode="Markdown",
+        )
+
+
+@bot.message_handler(commands=["snapshot"])
+def cmd_snapshot(message: telebot.types.Message):
+    if not is_authorized(message):
+        return unauthorized_reply(message)
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        bot.reply_to(
+            message,
+            "Usage:\n"
+            "`/snapshot save <name>` - Save current state\n"
+            "`/snapshot load <name>` - Load a saved snapshot\n"
+            "`/snapshot list` - List saved snapshots\n\n"
+            "Example: `/snapshot save chatgpt_logged_in`",
+        )
+        return
+
+    action = parts[1].lower()
+    name = parts[2] if len(parts) > 2 else ""
+
+    if action == "list":
+        msg = bot.reply_to(message, "Listing snapshots...")
+        try:
+            ssh = get_ssh_client()
+            exit_code, out, err = run_remote_command(
+                ssh, "adb emu avd snapshot list 2>&1"
+            )
+            ssh.close()
+            bot.edit_message_text(
+                f"*Snapshots*\n```\n{_truncate(out if out else err)}\n```",
+                message.chat.id, msg.message_id, parse_mode="Markdown",
+            )
+        except Exception as e:
+            bot.edit_message_text(
+                f"Failed: `{e}`", message.chat.id, msg.message_id, parse_mode="Markdown",
+            )
+        return
+
+    if not name:
+        bot.reply_to(message, f"Usage: `/snapshot {action} <name>`")
+        return
+
+    if action == "save":
+        msg = bot.reply_to(message, f"Saving snapshot `{name}`...")
+        try:
+            ssh = get_ssh_client()
+            exit_code, out, err = run_remote_command(
+                ssh, f"adb emu avd snapshot save {name} 2>&1"
+            )
+            ssh.close()
+            status = "Snapshot Saved" if exit_code == 0 else "Save Failed"
+            bot.edit_message_text(
+                f"*{status}*: `{name}`\n```\n{_truncate(out if out else err)}\n```",
+                message.chat.id, msg.message_id, parse_mode="Markdown",
+            )
+        except Exception as e:
+            bot.edit_message_text(
+                f"Snapshot save failed: `{e}`",
+                message.chat.id, msg.message_id, parse_mode="Markdown",
+            )
+
+    elif action == "load":
+        msg = bot.reply_to(message, f"Loading snapshot `{name}`...")
+        try:
+            ssh = get_ssh_client()
+            exit_code, out, err = run_remote_command(
+                ssh, f"adb emu avd snapshot load {name} 2>&1"
+            )
+            ssh.close()
+            status = "Snapshot Loaded" if exit_code == 0 else "Load Failed"
+            bot.edit_message_text(
+                f"*{status}*: `{name}`\n```\n{_truncate(out if out else err)}\n```",
+                message.chat.id, msg.message_id, parse_mode="Markdown",
+            )
+        except Exception as e:
+            bot.edit_message_text(
+                f"Snapshot load failed: `{e}`",
+                message.chat.id, msg.message_id, parse_mode="Markdown",
+            )
+
+    else:
+        bot.reply_to(message, f"Unknown snapshot action: `{action}`. Use save, load, or list.")
 
 
 # ---------------------------------------------------------------------------
