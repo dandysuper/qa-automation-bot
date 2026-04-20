@@ -7,6 +7,7 @@ import logging
 import os
 import base64
 import signal
+import socket
 import sys
 import tempfile
 import time
@@ -163,6 +164,7 @@ def cmd_help(message: telebot.types.Message):
         "Commands:\n"
         "`/test_iap` - Run the full IAP validation QA suite on GCP\n"
         "`/status` - Check GCP node connectivity\n"
+        "`/diagnose` - Run network diagnostics to GCP node\n"
         "`/run <cmd>` - Execute a custom command on GCP\n"
         "`/logs` - Fetch last 50 lines of QA worker log\n"
         "`/emulator` - Check emulator status on GCP\n"
@@ -189,13 +191,131 @@ def cmd_status(message: telebot.types.Message):
         )
     except Exception as e:
         logger.exception("Status check failed")
+        troubleshoot = _ssh_troubleshoot_tips(e)
         bot.edit_message_text(
-            f"GCP node unreachable: `{type(e).__name__}: {e}`\n\n"
-            f"Target: `{GCP_USER}@{GCP_IP}:{GCP_PORT}`",
+            f"*GCP Node Unreachable*\n\n"
+            f"Error: `{type(e).__name__}: {e}`\n"
+            f"Target: `{GCP_USER}@{GCP_IP}:{GCP_PORT}`\n\n"
+            f"{troubleshoot}\n\n"
+            f"Run `/diagnose` for detailed network diagnostics.",
             message.chat.id,
             msg.message_id,
             parse_mode="Markdown",
         )
+
+
+def _ssh_troubleshoot_tips(exc: Exception) -> str:
+    """Return context-specific troubleshooting tips based on the SSH error."""
+    name = type(exc).__name__
+    msg = str(exc).lower()
+    if "timed out" in msg or name == "TimeoutError":
+        return (
+            "*Likely cause: GCP firewall blocking port 22*\n"
+            "Fix:\n"
+            "```\n"
+            "gcloud compute firewall-rules create allow-ssh-railway \\\n"
+            "  --direction=INGRESS --action=ALLOW \\\n"
+            "  --rules=tcp:22 --source-ranges=0.0.0.0/0 \\\n"
+            "  --target-tags=allow-ssh\n"
+            "```\n"
+            "Also verify:\n"
+            "- VM is running: `gcloud compute instances list`\n"
+            "- IP is current: `gcloud compute instances describe android-frida-vm --zone=europe-west1-b --format='get(networkInterfaces[0].accessConfigs[0].natIP)'`"
+        )
+    if "auth" in msg or "key" in msg or name == "AuthenticationException":
+        return (
+            "*Likely cause: SSH key mismatch*\n"
+            "Verify `SSH_PRIVATE_KEY_B64` in Railway matches the public key on the VM:\n"
+            "`gcloud compute ssh android-frida-vm --zone=europe-west1-b -- 'cat ~/.ssh/authorized_keys'`"
+        )
+    if "refused" in msg:
+        return (
+            "*Likely cause: SSH service not running on VM*\n"
+            "Fix: `gcloud compute ssh android-frida-vm --zone=europe-west1-b -- 'sudo systemctl restart sshd'`"
+        )
+    return (
+        "Check:\n"
+        "1. VM is running\n"
+        "2. Firewall allows TCP:22\n"
+        "3. SSH key is correct"
+    )
+
+
+@bot.message_handler(commands=["diagnose"])
+def cmd_diagnose(message: telebot.types.Message):
+    if not is_authorized(message):
+        return unauthorized_reply(message)
+
+    msg = bot.reply_to(message, "Running network diagnostics to GCP node...")
+    results = []
+    results.append(f"Target: `{GCP_USER}@{GCP_IP}:{GCP_PORT}`")
+    results.append("")
+
+    # 1. DNS resolution
+    try:
+        resolved = socket.getaddrinfo(GCP_IP, GCP_PORT, socket.AF_INET, socket.SOCK_STREAM)
+        ip = resolved[0][4][0] if resolved else GCP_IP
+        results.append(f"DNS/IP resolve: `{ip}`")
+    except socket.gaierror as e:
+        results.append(f"DNS resolution FAILED: `{e}`")
+        results.append("\nThe GCP_IP may be invalid. Check your Railway env vars.")
+        bot.edit_message_text(
+            "*Diagnostics Result*\n\n" + "\n".join(results),
+            message.chat.id, msg.message_id, parse_mode="Markdown",
+        )
+        return
+
+    # 2. TCP port check (quick 10s timeout)
+    results.append("")
+    results.append("*TCP Port Check (10s timeout):*")
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        result = sock.connect_ex((GCP_IP, GCP_PORT))
+        sock.close()
+        if result == 0:
+            results.append(f"Port {GCP_PORT}: OPEN")
+        else:
+            results.append(f"Port {GCP_PORT}: CLOSED/FILTERED (errno={result})")
+            results.append("")
+            results.append("*This means the GCP firewall is blocking SSH.*")
+            results.append("Fix with:")
+            results.append("```")
+            results.append("gcloud compute firewall-rules create allow-ssh \\")
+            results.append("  --direction=INGRESS --action=ALLOW \\")
+            results.append("  --rules=tcp:22 --source-ranges=0.0.0.0/0 \\")
+            results.append("  --target-tags=allow-ssh")
+            results.append("```")
+            results.append("Then add the `allow-ssh` network tag to your VM:")
+            results.append("```")
+            results.append("gcloud compute instances add-tags android-frida-vm \\")
+            results.append("  --zone=europe-west1-b --tags=allow-ssh")
+            results.append("```")
+    except socket.timeout:
+        results.append(f"Port {GCP_PORT}: TIMEOUT (no response in 10s)")
+        results.append("")
+        results.append("*Firewall is likely blocking traffic.* See fix above.")
+    except Exception as e:
+        results.append(f"Port check error: `{e}`")
+
+    # 3. SSH auth test (only if port is open)
+    if result == 0:
+        results.append("")
+        results.append("*SSH Authentication Test:*")
+        try:
+            ssh = get_ssh_client()
+            ssh.close()
+            results.append("SSH auth: SUCCESS")
+        except Exception as e:
+            results.append(f"SSH auth: FAILED — `{type(e).__name__}: {e}`")
+            results.append("")
+            tips = _ssh_troubleshoot_tips(e)
+            results.append(tips)
+
+    bot.edit_message_text(
+        "*Diagnostics Result*\n\n" + "\n".join(results),
+        message.chat.id, msg.message_id, parse_mode="Markdown",
+    )
 
 
 @bot.message_handler(commands=["test_iap"])
