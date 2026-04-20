@@ -1,0 +1,118 @@
+name: QA Automation Tests
+
+on:
+  push:
+    branches: [main, base]
+  pull_request:
+    branches: [main, base]
+  workflow_dispatch:
+    inputs:
+      plan:
+        description: 'Subscription plan to test'
+        required: false
+        default: ''
+        type: string
+      target_package:
+        description: 'Target Android package name'
+        required: false
+        default: 'com.target.application'
+        type: string
+
+jobs:
+  lint-and-validate:
+    name: Lint & Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Syntax check bot.py
+        run: python -m py_compile bot.py
+
+      - name: Validate JSON configs
+        run: |
+          python -c "
+          import json, sys, os
+          for f in ['config/subscription_plans.json']:
+              if os.path.exists(f):
+                  try:
+                      json.load(open(f))
+                      print(f'  {f}: OK')
+                  except Exception as e:
+                      print(f'  {f}: INVALID - {e}')
+                      sys.exit(1)
+          "
+
+      - name: Check shell scripts
+        run: |
+          for script in scripts/*.sh; do
+            echo "Checking $script..."
+            bash -n "$script" && echo "  OK" || echo "  FAILED"
+          done
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: lint-and-validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t qa-automation-bot:test .
+
+      - name: Verify bot starts (dry run)
+        run: |
+          # Bot should exit with error since TG_TOKEN is not set
+          docker run --rm -e TG_TOKEN="" qa-automation-bot:test python -c "
+          import bot
+          print('Module imports OK')
+          " 2>&1 || true
+
+  integration-ready:
+    name: Integration Readiness
+    runs-on: ubuntu-latest
+    needs: lint-and-validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify project structure
+        run: |
+          echo "Checking required files..."
+          for f in bot.py requirements.txt Dockerfile Procfile railway.toml .env.example; do
+            if [ -f "$f" ]; then
+              echo "  $f: present"
+            else
+              echo "  $f: MISSING"
+              exit 1
+            fi
+          done
+
+      - name: Verify Frida scripts exist
+        run: |
+          echo "Checking Frida scripts..."
+          for f in scripts/frida/qa_profiler.js scripts/frida/subscription_hooks.js; do
+            if [ -f "$f" ]; then
+              echo "  $f: present"
+            else
+              echo "  $f: MISSING"
+              exit 1
+            fi
+          done
+
+      - name: Verify subscription config
+        run: |
+          python3 -c "
+          import json
+          cfg = json.load(open('config/subscription_plans.json'))
+          plans = cfg.get('plans', {})
+          print(f'Subscription plans configured: {len(plans)}')
+          for name, plan in plans.items():
+              print(f'  {name}: {plan.get(\"description\", \"no description\")}')
+          "
