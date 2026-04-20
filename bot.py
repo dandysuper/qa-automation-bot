@@ -149,6 +149,8 @@ def cmd_help(message: telebot.types.Message):
         "`/run_iap_test <email> <password> <mock_payment>` — "
         "Spin up an isolated Docker container and run the containerized "
         "IAP flow with Frida instrumentation\n"
+        "`/upload_apk` — Reply to a file with this command to upload "
+        "APK/XAPK to the GCP data volume\n"
         "`/status` — Check GCP node connectivity\n"
         "`/run <cmd>` — Execute a custom command on GCP\n"
         "`/logs` — Fetch last 50 lines of QA worker log\n"
@@ -374,6 +376,109 @@ def cmd_run_iap_test(message: telebot.types.Message):
             message.chat.id,
             msg.message_id,
             parse_mode="Markdown",
+        )
+
+
+@bot.message_handler(commands=["upload_apk"])
+def cmd_upload_apk(message: telebot.types.Message):
+    """Download an APK/XAPK file sent via Telegram and upload it to the GCP
+    data volume via SCP. Supports both direct file messages and replies."""
+    if not is_authorized(message):
+        return unauthorized_reply(message)
+
+    # Find the document — either in this message or in a replied-to message
+    doc = None
+    if message.document:
+        doc = message.document
+    elif message.reply_to_message and message.reply_to_message.document:
+        doc = message.reply_to_message.document
+
+    if not doc:
+        bot.reply_to(
+            message,
+            "Send an APK/XAPK file, or reply to a file message with "
+            "`/upload_apk` to upload it to the GCP test environment.",
+        )
+        return
+
+    file_name = doc.file_name or "app-staging.apk"
+    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    if ext not in ("apk", "xapk", "apks"):
+        bot.reply_to(message, f"Unsupported file type `.{ext}`. Send an APK, XAPK, or APKS file.")
+        return
+
+    file_size_mb = (doc.file_size or 0) / (1024 * 1024)
+    msg = bot.reply_to(
+        message,
+        f"Downloading `{file_name}` ({file_size_mb:.1f} MB) from Telegram...",
+    )
+
+    try:
+        # Download file from Telegram
+        file_info = bot.get_file(doc.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+
+        # Write to a local temp file
+        local_path = f"/tmp/{file_name}"
+        with open(local_path, "wb") as f:
+            f.write(downloaded)
+
+        bot.edit_message_text(
+            f"Downloaded `{file_name}`. Uploading to GCP...",
+            message.chat.id,
+            msg.message_id,
+            parse_mode="Markdown",
+        )
+
+        # SCP to GCP data volume
+        remote_path = f"{QA_DATA_VOLUME}/{file_name}"
+        ssh = get_ssh_client()
+        sftp = ssh.open_sftp()
+        sftp.put(local_path, remote_path)
+        sftp.close()
+        ssh.close()
+
+        # Clean up local temp file
+        os.unlink(local_path)
+
+        bot.edit_message_text(
+            f"*Upload Complete*\n\n"
+            f"File: `{file_name}` ({file_size_mb:.1f} MB)\n"
+            f"Location: `{remote_path}`\n\n"
+            f"To use this in a test run:\n"
+            f"`/run_iap_test <email> <password>`",
+            message.chat.id,
+            msg.message_id,
+            parse_mode="Markdown",
+        )
+
+    except Exception as e:
+        logger.exception("APK upload failed")
+        bot.edit_message_text(
+            f"Upload failed: `{e}`",
+            message.chat.id,
+            msg.message_id,
+            parse_mode="Markdown",
+        )
+
+
+@bot.message_handler(content_types=["document"])
+def handle_document(message: telebot.types.Message):
+    """Auto-detect APK/XAPK files sent without a command and offer to upload."""
+    if not is_authorized(message):
+        return
+
+    doc = message.document
+    if not doc or not doc.file_name:
+        return
+
+    ext = doc.file_name.rsplit(".", 1)[-1].lower() if "." in doc.file_name else ""
+    if ext in ("apk", "xapk", "apks"):
+        file_size_mb = (doc.file_size or 0) / (1024 * 1024)
+        bot.reply_to(
+            message,
+            f"Detected `{doc.file_name}` ({file_size_mb:.1f} MB).\n"
+            f"Reply to this file with `/upload_apk` to upload it to the GCP test environment.",
         )
 
 

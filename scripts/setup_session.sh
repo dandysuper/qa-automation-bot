@@ -98,12 +98,12 @@ log "PHASE 2: Pushing Frida server to device"
 adb push /opt/frida-server /data/local/tmp/frida-server
 adb shell chmod 755 /data/local/tmp/frida-server
 
-log "PHASE 2: Installing staging APK from ${TARGET_APK_PATH}"
+log "PHASE 2: Installing app from ${TARGET_APK_PATH}"
 if [ -f "${TARGET_APK_PATH}" ]; then
-    adb install -r -g "${TARGET_APK_PATH}"
-    log "PHASE 2: APK installed successfully"
+    bash /opt/qa/install_xapk.sh "${TARGET_APK_PATH}"
+    log "PHASE 2: App installed successfully"
 else
-    log "WARNING: APK not found at ${TARGET_APK_PATH}, assuming pre-installed"
+    log "WARNING: App package not found at ${TARGET_APK_PATH}, assuming pre-installed"
 fi
 
 # ---------------------------------------------------------------------------

@@ -99,11 +99,14 @@ RUN pip3 install --no-cache-dir frida-tools==${FRIDA_VERSION}
 # ---------------------------------------------------------------------------
 # Copy QA scripts into image
 # ---------------------------------------------------------------------------
-COPY scripts/setup_session.sh /opt/qa/setup_session.sh
-COPY scripts/qa_worker.sh     /opt/qa/qa_worker.sh
-COPY scripts/hook_1m.js       /opt/qa/hook_1m.js
+COPY scripts/setup_session.sh    /opt/qa/setup_session.sh
+COPY scripts/qa_worker.sh        /opt/qa/qa_worker.sh
+COPY scripts/hook_1m.js          /opt/qa/hook_1m.js
+COPY scripts/install_xapk.sh     /opt/qa/install_xapk.sh
+COPY scripts/login_automation.py /opt/qa/login_automation.py
+COPY scripts/ui_mapper.sh        /opt/qa/ui_mapper.sh
 
-RUN chmod +x /opt/qa/*.sh
+RUN chmod +x /opt/qa/*.sh /opt/qa/*.py
 
 # ---------------------------------------------------------------------------
 # Emulator configuration tweaks for headless CI

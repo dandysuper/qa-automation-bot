@@ -72,6 +72,7 @@ Bot   → "Containerized IAP Test — PASSED ✅
 | `/start` `/help` | Show available commands |
 | `/test_iap` | Run the full IAP validation QA suite on GCP (legacy) |
 | `/run_iap_test <email> <password> [mock_payment]` | Run containerized IAP test with Frida instrumentation |
+| `/upload_apk` | Reply to a file to upload APK/XAPK to GCP data volume |
 | `/status` | Check GCP node connectivity |
 | `/run <cmd>` | Execute a custom command on GCP |
 | `/logs` | Fetch last 50 lines of QA worker log |
@@ -185,7 +186,7 @@ The golden image is an immutable base containing:
 - Pre-configured AVD (`qa_device`, Pixel 4, x86_64)
 - Frida server (`frida-server-16.2.1-android-x86_64`)
 - `frida-tools` Python package
-- QA scripts (`setup_session.sh`, `qa_worker.sh`, `hook_1m.js`)
+- QA scripts (`setup_session.sh`, `qa_worker.sh`, `hook_1m.js`, `install_xapk.sh`, `login_automation.py`, `ui_mapper.sh`)
 
 Each test session spawns a new container from this image, ensuring complete isolation and a clean state.
 
@@ -194,7 +195,7 @@ Each test session spawns a new container from this image, ensuring complete isol
 | Phase | Action |
 |-------|--------|
 | 1 | Boot headless Android emulator |
-| 2 | Push Frida server to device, install staging APK |
+| 2 | Push Frida server to device, install APK/XAPK (auto-detects format) |
 | 3 | Login to Google Play sandbox via ADB keyevents |
 | 4 | Save pre-warmed AVD snapshot (`test_ready_<session_id>`) |
 | 5 | Start Frida server, inject `hook_1m.js` |
@@ -222,10 +223,56 @@ Automated tap sequences through the subscription upgrade flow:
 6. Verify subscription state in-app
 7. Capture screenshots at each step
 
+### XAPK Installation (`scripts/install_xapk.sh`)
+
+Auto-detects and handles multiple package formats:
+- `.apk` — standard single APK install via `adb install`
+- `.xapk` — extracts the ZIP archive, finds all split APKs, installs via `adb install-multiple`
+- `.apks` — same as XAPK (ZIP of split APKs)
+
+### Login Automation (`scripts/login_automation.py`)
+
+Python module for automating Google account sign-in on the emulator:
+- Launches the system "Add Account" activity
+- Navigates the sign-in flow using `adb shell input` commands
+- Uses `uiautomator dump` to find UI elements by text (no hardcoded coordinates)
+- Waits for "Checking info" loading screens before proceeding
+- Verifies account was added via `dumpsys account`
+- Can launch the target app and find/tap SSO buttons after login
+
+```bash
+# Standalone usage
+python3 scripts/login_automation.py --email test@example.com --password P@ss \
+    --package com.yourcompany.app --sso-button "Continue with Google"
+```
+
+### UI Mapper (`scripts/ui_mapper.sh`)
+
+Dumps the current screen's UI hierarchy and extracts clickable element coordinates:
+
+```bash
+# List all clickable elements with coordinates
+bash scripts/ui_mapper.sh
+
+# Find a specific button
+bash scripts/ui_mapper.sh "Upgrade"
+
+# Save full XML dump
+bash scripts/ui_mapper.sh --save /data/qa/ui_dump.xml
+```
+
+### APK Upload via Telegram (`/upload_apk`)
+
+Upload APK/XAPK files directly through the Telegram bot:
+1. Send the file to the bot chat
+2. Bot auto-detects the APK/XAPK and prompts you
+3. Reply to the file with `/upload_apk`
+4. Bot downloads the file and SCPs it to the GCP data volume
+
 ### Persistent Data Volume
 
 The GCP persistent disk mounted at `/mnt/qa-data` stores:
-- Staging APK files
+- Staging APK/XAPK files (uploaded via Telegram or manually)
 - AVD snapshots for faster re-runs
 - Session logs (`session_<id>.log`)
 - QA screenshots
@@ -282,7 +329,10 @@ qa-automation-bot/
 ├── scripts/
 │   ├── setup_session.sh        # Container lifecycle (runs inside Docker)
 │   ├── qa_worker.sh            # UI automation for IAP flow
-│   └── hook_1m.js              # Frida instrumentation (billing mocks)
+│   ├── hook_1m.js              # Frida instrumentation (billing mocks)
+│   ├── install_xapk.sh         # XAPK/multi-APK installer
+│   ├── login_automation.py     # Google account login automation
+│   └── ui_mapper.sh            # UI hierarchy dump & element finder
 ├── docker/
 │   ├── Dockerfile.golden       # Golden image (Android AVD + Frida)
 │   └── docker-compose.yml      # Container orchestration
