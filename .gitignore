@@ -31,3 +31,10 @@ logs/
 *.pem
 *.key
 gcp_key*
+
+# QA session artifacts
+session_logs/
+screenshots/
+snapshots/
+*.xapk
+*.apk
