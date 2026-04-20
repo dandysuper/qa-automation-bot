@@ -2,6 +2,66 @@
 
 Remote QA Automation & IAP Validation Framework. A Telegram bot hosted on [Railway](https://railway.com) that triggers Android in-app purchase (IAP) UI flow testing on a GCP VM.
 
+## Current Status
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **Telegram Bot** | ✅ Live | Deployed on Railway, responding to commands |
+| **GCP VM** | ✅ Running | `n1-standard-4` in `europe-west1-b` (IP: `34.79.0.196`) |
+| **Android SDK** | ✅ Installed | SDK, emulator, platform-tools on GCP VM |
+| **AVD (pixel_12)** | ✅ Created | `system-images;android-32;google_apis;x86_64` |
+| **Frida** | ✅ Installed | frida-tools + frida-server binary for Android x86_64 |
+| **SSH Bot → GCP** | ⚠️ Needs Testing | Verify with `/status` after Railway redeploy |
+| **Target App** | ❌ Not Set | Still using placeholder `com.target.application` |
+| **Full QA Flow** | ❌ Not Tested | Needs SSH working + target app configured |
+
+## What Needs Fixing
+
+### 1. Verify SSH Connectivity (Priority: High)
+The bot was hitting a **409 conflict** (multiple polling instances) — this is now fixed (PR #5). After Railway redeploys:
+- Send `/status` to the bot on Telegram
+- If it shows "GCP node reachable", SSH is working
+- If it shows a timeout, check Railway logs for the detailed error
+
+### 2. Configure Target Application (Priority: Medium)
+The worker script (`scripts/qa_worker.sh` and `/home/ubuntu/qa_worker.sh` on GCP) uses placeholder values:
+- Replace `com.target.application` with your actual Android package name
+- Replace `TargetApp` with the app's process name (for Frida)
+- Adjust tap coordinates (`500 1500`, `500 1800`) for your app's checkout UI
+- Install your target APK on the emulator
+
+### 3. Frida Profiler Script (Priority: Low)
+The file `/home/ubuntu/qa_profiler.js` on the GCP VM is a placeholder. Replace it with your actual Frida hooks for:
+- SSL pinning monitoring
+- IAP billing flow interception
+- Network traffic analysis
+
+## What to Test
+
+### Step 1: Bot Connectivity
+```
+/status          → Should show "GCP node reachable" with uptime
+```
+
+### Step 2: Remote Commands
+```
+/run whoami      → Should return "ubuntu" (or your GCP_USER)
+/run uname -a    → Should return Linux kernel info
+/emulator        → Shows if any AVD is running
+```
+
+### Step 3: Emulator Boot
+```
+/run emulator -avd pixel_12 -no-window -no-audio -no-snapshot &
+/emulator        → Should show emulator process running
+```
+
+### Step 4: Full QA Suite (after configuring target app)
+```
+/test_iap        → Runs full qa_worker.sh flow
+/logs            → Check output of last run
+```
+
 ## Architecture
 
 ```
@@ -9,8 +69,8 @@ Telegram ──> Railway (this bot) ──SSH──> GCP VM (Android emulator + 
 ```
 
 - **Trigger Node (Railway):** Python Telegram bot — acts as the CI/CD trigger.
-- **Execution Node (GCP):** n1-standard-4 VM running headless Android Virtual Devices (AVD) with nested virtualization.
-- **Target:** Configurable Android APK (`com.yourcompany.app` by default).
+- **Execution Node (GCP):** n1-standard-4 VM in europe-west1-b with nested virtualization.
+- **Target:** Configurable Android APK.
 
 ## Execution Flow
 
@@ -40,24 +100,28 @@ Telegram ──> Railway (this bot) ──SSH──> GCP VM (Android emulator + 
 - A GCP VM (n1-standard-4 recommended) with:
   - Nested virtualization enabled
   - Android SDK / emulator installed
-  - AVD configured (default name: `qa_device`)
-  - Frida server running (optional, for SSL/network monitoring)
+  - AVD configured (name: `pixel_12`)
+  - Frida server binary at `/home/ubuntu/frida/frida-server`
   - SSH access with key-based auth
 
 ### 2. GCP VM Setup
 
-Copy the worker script to your GCP VM:
+Run the automated setup script on your GCP VM:
 
 ```bash
-scp scripts/qa_worker.sh ubuntu@<GCP_IP>:/home/ubuntu/qa_worker.sh
-chmod +x /home/ubuntu/qa_worker.sh
+# From Cloud Shell:
+gcloud compute ssh android-frida-vm --zone=europe-west1-b -- 'bash -s' < scripts/gcp_vm_setup.sh
+
+# Or SSH in manually and run:
+bash scripts/gcp_vm_setup.sh
 ```
 
-Customize the environment variables in the script:
-- `TARGET_APK` — path to your APK on the VM
-- `TARGET_PACKAGE` — your app's package name
-- `AVD_NAME` — Android Virtual Device name
-- Adjust tap coordinates in the UAT section for your app's layout
+This installs Android SDK, emulator, AVD (pixel_12), Frida server, and helper scripts.
+
+After setup, push Frida server to the emulator:
+```bash
+bash /home/ubuntu/push_frida.sh
+```
 
 ### 3. Deploy to Railway
 
@@ -90,13 +154,13 @@ Set these in Railway dashboard (Settings → Variables):
 | `SSH_PRIVATE_KEY_B64` | Yes | Base64-encoded SSH private key |
 | `ALLOWED_CHAT_IDS` | No | Comma-separated Telegram chat IDs (empty = open access) |
 | `QA_WORKER_SCRIPT` | No | Path to worker script on GCP (default: `/home/ubuntu/qa_worker.sh`) |
-| `SSH_TIMEOUT` | No | SSH connection timeout in seconds (default: `30`) |
+| `SSH_TIMEOUT` | No | SSH connection timeout in seconds (default: `60`) |
 | `COMMAND_TIMEOUT` | No | Remote command timeout in seconds (default: `600`) |
 
 #### Encoding your SSH key
 
 ```bash
-cat ~/.ssh/id_rsa | base64 -w 0
+cat ~/.ssh/your_key | base64 -w 0
 ```
 
 Copy the output and paste it as the `SSH_PRIVATE_KEY_B64` value in Railway.
@@ -135,18 +199,36 @@ docker run --env-file .env qa-bot
 
 ```
 qa-automation-bot/
-├── bot.py              # Main Telegram bot (runs on Railway)
+├── bot.py                    # Main Telegram bot (runs on Railway)
 ├── scripts/
-│   └── qa_worker.sh    # GCP worker script (runs on GCP VM)
-├── requirements.txt    # Python dependencies
-├── Procfile            # Railway process definition
-├── railway.toml        # Railway deployment config
-├── nixpacks.toml       # Nixpacks build config
-├── Dockerfile          # Docker build (alternative)
-├── .env.example        # Environment variable template
-├── .gitignore          # Git ignore rules
-└── README.md           # This file
+│   ├── qa_worker.sh          # GCP worker script (runs on GCP VM)
+│   └── gcp_vm_setup.sh       # One-shot GCP VM setup script
+├── requirements.txt          # Python dependencies
+├── Procfile                  # Railway process definition
+├── railway.toml              # Railway deployment config
+├── nixpacks.toml             # Nixpacks build config
+├── Dockerfile                # Docker build (alternative)
+├── .env.example              # Environment variable template
+├── .gitignore                # Git ignore rules
+└── README.md                 # This file
 ```
+
+## GCP VM Details
+
+| Property | Value |
+|----------|-------|
+| Instance | `android-frida-vm` |
+| Zone | `europe-west1-b` |
+| Machine | `n1-standard-4` (4 vCPU, 15 GB RAM) |
+| OS | Ubuntu 22.04 LTS |
+| Disk | 60 GB SSD |
+| IP | `34.79.0.196` |
+| SSH User | `ubuntu` |
+| Android SDK | `/home/ubuntu/android-sdk` |
+| AVD | `pixel_12` (API 32, x86_64) |
+| Frida Server | `/home/ubuntu/frida/frida-server` |
+| Worker Script | `/home/ubuntu/qa_worker.sh` |
+| Profiler | `/home/ubuntu/qa_profiler.js` |
 
 ## Security Notes
 
@@ -154,6 +236,7 @@ qa-automation-bot/
 - Use `ALLOWED_CHAT_IDS` to restrict bot access to authorized users only.
 - SSH keys are stored base64-encoded in environment variables and written to temp files only during connection, then immediately deleted.
 - Consider using GCP IAM service accounts and OS Login for production deployments.
+- Rotate your Telegram bot token and SSH keys periodically.
 
 ## License
 
