@@ -21,9 +21,32 @@ Remote QA Automation & IAP Validation Framework. A Telegram bot hosted on [Railw
 The bot was hitting a **409 conflict** (multiple polling instances) and SSH timeouts. Both issues are now addressed:
 - **409 fix:** Graceful SIGTERM shutdown, `delete_webhook(drop_pending_updates=True)`, configurable startup delay, and exponential backoff on 409 retries.
 - **SSH fix:** Automatic retry with configurable attempts (`SSH_RETRIES`) and exponential backoff (`SSH_RETRY_DELAY`).
+- Send `/diagnose` to the bot for full network diagnostics (DNS, TCP port, SSH auth)
 - Send `/status` to the bot on Telegram
 - If it shows "GCP node reachable", SSH is working
-- If it shows a timeout after all retries, check Railway logs for the detailed error
+- If SSH times out, run the firewall setup script:
+
+```bash
+# From Cloud Shell or local machine with gcloud:
+bash scripts/gcp_firewall_setup.sh
+
+# Or manually:
+gcloud compute firewall-rules create allow-ssh-ingress \
+  --direction=INGRESS --action=ALLOW \
+  --rules=tcp:22 --source-ranges=0.0.0.0/0 \
+  --target-tags=allow-ssh
+
+gcloud compute instances add-tags android-frida-vm \
+  --zone=europe-west1-b --tags=allow-ssh
+```
+
+Also verify the VM's external IP hasn't changed:
+```bash
+gcloud compute instances describe android-frida-vm \
+  --zone=europe-west1-b \
+  --format='get(networkInterfaces[0].accessConfigs[0].natIP)'
+```
+If it differs from the `GCP_IP` in Railway, update it.
 
 ### 2. Configure Target Application (Priority: Medium)
 Update `config/subscription_plans.json` with your app details:
@@ -90,6 +113,7 @@ Telegram ──> Railway (this bot) ──SSH──> GCP VM (Android emulator + 
 | `/start` `/help` | Show available commands |
 | `/test_iap` | Run the full IAP validation QA suite on GCP |
 | `/status` | Check GCP node connectivity |
+| `/diagnose` | Run network diagnostics (DNS, TCP port, SSH auth) |
 | `/run <cmd>` | Execute a custom command on GCP |
 | `/logs` | Fetch last 50 lines of QA worker log |
 | `/emulator` | Check emulator status on GCP |
@@ -211,6 +235,7 @@ qa-automation-bot/
 │   ├── setup_emulator.sh         # Automated emulator setup (APK, Frida, root)
 │   ├── frida_service.sh          # Persistent frida-server manager (systemd)
 │   ├── multi_instance_runner.sh  # Parallel AVD instance runner
+│   ├── gcp_firewall_setup.sh     # GCP firewall rules for SSH access
 │   └── frida/
 │       ├── qa_profiler.js        # Enhanced Frida hooks (Appdome, SSL, billing)
 │       └── subscription_hooks.js # Subscription state detection & OfferId injection
