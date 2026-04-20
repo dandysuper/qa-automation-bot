@@ -37,7 +37,10 @@ SSH_TIMEOUT = int(os.getenv("SSH_TIMEOUT", "30"))
 COMMAND_TIMEOUT = int(os.getenv("COMMAND_TIMEOUT", "600"))  # 10 min default
 
 if not TG_TOKEN:
-    raise RuntimeError("TG_TOKEN environment variable is required")
+    logger.error("TG_TOKEN environment variable is required. Set it in Railway dashboard.")
+    logger.error("Bot cannot start without a valid Telegram token.")
+    import sys
+    sys.exit(1)
 
 bot = telebot.TeleBot(TG_TOKEN, parse_mode="Markdown")
 
